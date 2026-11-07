@@ -1,74 +1,104 @@
-"""
-DetectivePM - Google Sheets sync helper.
+"""Google Sheets sync. Upserts by job id, so re-running never duplicates rows."""
 
-Reads CSV export and uploads rows to a target Google Sheet using
-Google API Client libraries with a service account.
-Gracefully skips if credentials.json is missing.
-"""
+from __future__ import annotations
 
-import os
-from typing import Optional
+import json
+import logging
 
-CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.json")
-CSV_PATH = os.path.join(os.path.dirname(__file__), "detective_pm_jobs.csv")
+from sqlalchemy.orm import Session, selectinload
+
+from backend.config import settings
+from backend.exports import CSV_COLUMNS, job_to_row
+from backend.models import Job, SheetSyncLog, utcnow
+from backend.queries import visible_jobs
+
+log = logging.getLogger("detectivepm.gsheets")
+
+SHEET = "Jobs"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+HEADER = ["Job ID", *CSV_COLUMNS]
 
 
-def sync_to_gsheets(spreadsheet_id: str) -> Optional[str]:
-    """
-    Sync detective_pm_jobs.csv to a Google Sheet.
+def is_configured() -> bool:
+    return bool(settings.google_sheets_id and settings.google_service_account_json)
 
-    Args:
-        spreadsheet_id: The Google Sheets ID from the spreadsheet URL.
 
-    Returns:
-        Status message string, or None if skipped due to missing credentials.
-    """
-    if not os.path.exists(CREDENTIALS_PATH):
-        print(f"[gsheets] {CREDENTIALS_PATH} not found. Skipping Google Sheets sync.")
-        return None
+def _service():
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
 
-    if not os.path.exists(CSV_PATH):
-        print(f"[gsheets] {CSV_PATH} not found. Run a scrape or export first.")
-        return "CSV file not found"
+    info = json.loads(settings.google_service_account_json)
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
-    try:
-        import pandas as pd
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
 
-        SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = service_account.Credentials.from_service_account_file(
-            CREDENTIALS_PATH, scopes=SCOPES
-        )
-        service = build("sheets", "v4", credentials=creds)
+def _column(index: int) -> str:
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
 
-        df = pd.read_csv(CSV_PATH)
-        df = df.fillna("")
 
-        values = [df.columns.tolist()] + df.values.tolist()
-        body = {"values": values}
-
-        service.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id, range="Sheet1!A:Z", body={}
+def _ensure_sheet(values_api, sheets_api, spreadsheet_id: str) -> None:
+    metadata = sheets_api.get(spreadsheetId=spreadsheet_id).execute()
+    titles = {sheet["properties"]["title"] for sheet in metadata.get("sheets", [])}
+    if SHEET not in titles:
+        sheets_api.batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": SHEET}}}]},
         ).execute()
+    values_api.update(
+        spreadsheetId=spreadsheet_id, range=f"{SHEET}!A1", valueInputOption="RAW", body={"values": [HEADER]}
+    ).execute()
 
-        result = (
-            service.spreadsheets()
-            .values()
-            .update(
-                spreadsheetId=spreadsheet_id,
-                range="Sheet1!A1",
-                valueInputOption="RAW",
-                body=body,
-            )
-            .execute()
-        )
 
-        updated_cells = result.get("updatedCells", 0)
-        print(f"[gsheets] Successfully synced {updated_cells} cells to Google Sheet.")
-        return f"Successfully synced {updated_cells} cells."
+def sync_jobs(db: Session, service=None) -> SheetSyncLog:
+    entry = SheetSyncLog(status="running")
+    db.add(entry)
+    db.commit()
+    if not is_configured() and service is None:
+        entry.status = "not_configured"
+        entry.error_details = "GOOGLE_SHEETS_ID and GOOGLE_SERVICE_ACCOUNT_JSON are not set"
+        entry.completed_at = utcnow()
+        db.commit()
+        return entry
+    try:
+        service = service or _service()
+        sheets_api = service.spreadsheets()
+        values_api = sheets_api.values()
+        spreadsheet_id = settings.google_sheets_id
+        _ensure_sheet(values_api, sheets_api, spreadsheet_id)
 
-    except Exception as e:
-        err_msg = f"Google Sheets sync failed: {str(e)}"
-        print(f"[gsheets] {err_msg}")
-        return err_msg
+        existing = values_api.get(spreadsheetId=spreadsheet_id, range=f"{SHEET}!A2:A").execute().get("values", [])
+        row_by_id = {row[0]: index + 2 for index, row in enumerate(existing) if row}
+
+        jobs = db.scalars(visible_jobs().options(selectinload(Job.recruiters)).order_by(Job.id)).all()
+        last_column = _column(len(HEADER))
+        updates, appends = [], []
+        for job in jobs:
+            row = [str(job.id), *job_to_row(job, for_spreadsheet=False)]
+            if str(job.id) in row_by_id:
+                number = row_by_id[str(job.id)]
+                updates.append({"range": f"{SHEET}!A{number}:{last_column}{number}", "values": [row]})
+            else:
+                appends.append(row)
+        if updates:
+            values_api.batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"valueInputOption": "RAW", "data": updates}
+            ).execute()
+        if appends:
+            values_api.append(
+                spreadsheetId=spreadsheet_id, range=f"{SHEET}!A1", valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS", body={"values": appends},
+            ).execute()
+        entry.status = "success"
+        entry.rows_updated = len(updates)
+        entry.rows_appended = len(appends)
+    except Exception as exc:  # noqa: BLE001 - recorded for the status endpoint
+        log.warning("google sheets sync failed: %s", type(exc).__name__)
+        entry.status = "failed"
+        entry.error_details = f"{type(exc).__name__}: {str(exc)[:500]}"
+    entry.completed_at = utcnow()
+    db.commit()
+    return entry
