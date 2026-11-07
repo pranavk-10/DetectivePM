@@ -42,7 +42,7 @@ _EXCLUDE_LOCAL = re.compile(
 _ROLE_LOCAL = re.compile(r"(careers?|jobs?|talent|recruit\w*|hiring|hr|people|apply|campus|ta)\b", re.I)
 _FREE_MAIL = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "proton.me", "protonmail.com", "icloud.com"}
 _NAME_BEFORE = re.compile(
-    r"(?:contact|reach out to|write to|email|e-mail|send (?:your )?(?:cv|resume) to)\s+"
+    r"(?i:contact|reach out to|write to|email|e-mail|send (?:your )?(?:cv|resume) to)\s+"
     r"([A-Z][a-z]+(?:\s[A-Z][a-z]+){1,2})\s*(?:at|on|via|:|\(|,|-)?\s*$"
 )
 

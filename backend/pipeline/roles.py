@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-CLASSIFIER_VERSION = "rules-1.0"
+CLASSIFIER_VERSION = "rules-1.1"
 
 ACCEPT = "accept"
 REVIEW = "review"
@@ -13,7 +13,9 @@ REJECT = "reject"
 
 ACCEPT_THRESHOLD = 60
 REVIEW_THRESHOLD = 40
-MAX_ENTRY_YEARS = 3
+MAX_ENTRY_YEARS = 2  # a plain "Product Manager" asking for more is not entry-level
+MAX_TITLED_YEARS = 3  # APM and junior titles often ask for slightly more
+REJECT_FROM_YEARS = 5
 
 ROLE_INTERN = "Product Management Intern"
 ROLE_APM = "Associate Product Manager"
@@ -48,7 +50,7 @@ _PM_PHRASE_RE = re.compile(r"\b(product manager|product management)\b", re.I)
 _PM_RE = re.compile(r"\b(product manager|product management|pm)\b", re.I)
 _INTERN_RE = re.compile(r"\b(interns?|internship|summer analyst)\b", re.I)
 _APM_RE = re.compile(r"\b(associate product manager|apm|product manager,? associate|rotational product)\b", re.I)
-_JUNIOR_RE = re.compile(r"\b(junior|jr\.?)\s+(product manager|pm)\b", re.I)
+_JUNIOR_RE = re.compile(r"\b(junior|jr\.?)\s+(product manager|pm)\b|\bproduct manager\s+(i|1)\b", re.I)
 _GRAD_RE = re.compile(r"\b(graduate|new grad|campus|fresher|university grad)\b", re.I)
 _ENTRY_RE = re.compile(r"\b(entry[- ]level)\b", re.I)
 _ANALYST_RE = re.compile(r"\bproduct analyst\b", re.I)
@@ -58,6 +60,8 @@ _YEARS_RE = re.compile(
     r"(?:experience|exp\b|product|work|relevant)",
     re.I,
 )
+
+_TITLE_YEARS_RE = re.compile(r"\bexp(?:erience)?\.?\s*[:\-]?\s*(\d{1,2})\s*(?:\+|[-–to]+\s*\d{1,2})?\s*(?:years?|yrs?)", re.I)
 
 _RESPONSIBILITY_SIGNALS = {
     "lifecycle": r"product (life ?cycle|development|launch|release)|ship(ping)? (features|products)|go-to-market",
@@ -104,6 +108,7 @@ class RoleResult:
 def required_years(description: str) -> int | None:
     """Largest stated minimum, so '2+ years product, 5+ years overall' reads as 5."""
     found = [int(m.group(1)) for m in _YEARS_RE.finditer(description)]
+    found += [int(m.group(1)) for m in _TITLE_YEARS_RE.finditer(description)]
     found = [y for y in found if y <= 25]
     return max(found) if found else None
 
@@ -152,9 +157,10 @@ def classify_role(title: str, description: str) -> RoleResult:
     if role is None and not plain_pm:
         return _reject(f"title is not a product role: '{clean_title}'")
 
-    years = required_years(text)
-    if years is not None and years > MAX_ENTRY_YEARS + 2 and role != ROLE_INTERN:
+    years = required_years(clean_title + " . " + text)
+    if years is not None and years >= REJECT_FROM_YEARS and role != ROLE_INTERN:
         return _reject(f"requires {years}+ years of experience")
+    limit = MAX_TITLED_YEARS if role else MAX_ENTRY_YEARS
 
     responsibilities = _count(_RESPONSIBILITY_SIGNALS, text)
     skills = _count(_SKILL_SIGNALS, text)
@@ -165,7 +171,7 @@ def classify_role(title: str, description: str) -> RoleResult:
     skill_points = min(20, len(skills) * 5)
     if years is None:
         seniority_points = 10 if role else 3
-    elif years <= MAX_ENTRY_YEARS:
+    elif years <= limit:
         seniority_points = 10
     else:
         seniority_points = 3
@@ -189,7 +195,7 @@ def classify_role(title: str, description: str) -> RoleResult:
             REVIEW if score >= REVIEW_THRESHOLD else REJECT, None, score, 0.4,
             reason + "; plain 'Product Manager' title without entry-level evidence", None,
         )
-    if years is not None and years > MAX_ENTRY_YEARS:
+    if years is not None and years > limit:
         return RoleResult(REVIEW, role, score, 0.45, reason + f"; {years} years is above entry level", "Mid")
 
     level = "Internship" if role == ROLE_INTERN else "Entry"
