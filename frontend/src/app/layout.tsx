@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'DetectivePM | Product Management Job Intelligence',
-  description: 'Automated job-scraping and analytics dashboard for Product Management roles',
+  title: 'DetectivePM | India Product Management Jobs',
+  description: 'Verified Product Management internships and early-career roles in India, from legitimate sources.',
 }
 
 export default function RootLayout({

@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.pgdata
+backups
+venv
+frontend
+**/__pycache__
+.pytest_cache
+*.db
+*.csv
+*service-account*.json
+credentials*.json

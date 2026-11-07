@@ -1,0 +1,34 @@
+# Render Blueprint: one API service and one background worker from the same image.
+# Secrets marked sync:false are entered once in the Render dashboard.
+services:
+  - type: web
+    name: detectivepm-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars: &shared
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_API_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: BACKEND_URL
+        sync: false
+      - key: ADZUNA_APP_ID
+        sync: false
+      - key: ADZUNA_APP_KEY
+        sync: false
+      - key: GOOGLE_SHEETS_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+
+  - type: worker
+    name: detectivepm-worker
+    runtime: docker
+    plan: starter
+    dockerCommand: python -m backend.worker
+    envVars: *shared
